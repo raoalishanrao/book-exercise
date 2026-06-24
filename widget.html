@@ -513,7 +513,7 @@
         </label>
         <label>
           Voice
-          <select id="voice-select" disabled><option value="">Default English</option></select>
+          <select id="voice-select" disabled><option value="">Default Voice</option></select>
         </label>
         <label>
           Speed
@@ -524,6 +524,7 @@
           <select id="speech-lang">
             <option value="en-US">English (US)</option>
             <option value="en-GB">English (UK)</option>
+            <option value="ur-PK">Urdu (Pakistan) / اردو</option>
           </select>
         </label>
         <label class="toggle-row" style="grid-column:1/-1">
@@ -606,8 +607,6 @@
 
     const MIC_COUNTDOWN_MS = 1200;
     const SILENCE_STOP_MS = 1600;
-    const TTS_LANG = "en-US";
-    const NON_LATIN_RE = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF\uFB50-\uFDFF\uFE70-\uFEFF]/g;
 
     let micStartTimer = null;
     let micCountdownTimer = null;
@@ -628,7 +627,7 @@
       const saved = JSON.parse(localStorage.getItem("tutorVoice") || "{}");
       if (saved.autoTts !== undefined) els.autoTts.checked = saved.autoTts;
       if (saved.rate) els.speechRate.value = saved.rate;
-      const allowedLangs = ["en-US", "en-GB"];
+      const allowedLangs = ["en-US", "en-GB", "ur-PK"];
       if (saved.lang && allowedLangs.includes(saved.lang)) els.speechLang.value = saved.lang;
       else els.speechLang.value = "en-US";
       if (saved.voiceURI) els.voiceSelect.dataset.savedUri = saved.voiceURI;
@@ -647,11 +646,13 @@
       if (!ttsSupported) return;
       voices = window.speechSynthesis.getVoices();
       const prev = els.voiceSelect.value || els.voiceSelect.dataset.savedUri || "";
-      els.voiceSelect.innerHTML = '<option value="">Default English</option>';
-      voices.filter((v) => v.lang.startsWith("en")).forEach((v) => {
+      els.voiceSelect.innerHTML = '<option value="">Default Voice</option>';
+      
+      // Filter voices to include both English and Urdu voices
+      voices.filter((v) => v.lang.startsWith("en") || v.lang.startsWith("ur")).forEach((v) => {
         const opt = document.createElement("option");
         opt.value = v.voiceURI;
-        opt.textContent = v.name;
+        opt.textContent = `${v.name} (${v.lang})`;
         els.voiceSelect.appendChild(opt);
       });
       if (prev && [...els.voiceSelect.options].some((o) => o.value === prev)) {
@@ -663,7 +664,8 @@
 
     function textForSpeech(raw) {
       if (!raw) return "";
-      return raw.replace(NON_LATIN_RE, " ").replace(/\s+/g, " ").trim();
+      // Clean up whitespace while keeping non-Latin script characters alive
+      return raw.replace(/\s+/g, " ").trim();
     }
 
     function getSelectedVoice() {
@@ -671,9 +673,14 @@
       return voices.find((v) => v.voiceURI === uri) || null;
     }
 
-    function getEnglishVoice() {
+    function getFallbackVoice(langTarget) {
       const picked = getSelectedVoice();
-      if (picked?.lang.startsWith("en")) return picked;
+      if (picked && (picked.lang.startsWith("en") || picked.lang.startsWith("ur"))) return picked;
+      
+      // Fallback matching logic based on widget language preference
+      if (langTarget.startsWith("ur")) {
+        return voices.find((v) => v.lang.startsWith("ur")) || voices.find((v) => v.lang.startsWith("en")) || null;
+      }
       return voices.find((v) => v.lang === "en-US") || voices.find((v) => v.lang.startsWith("en")) || null;
     }
 
@@ -683,10 +690,15 @@
       if (!cleaned) return;
       window.speechSynthesis.cancel();
       const utter = new SpeechSynthesisUtterance(cleaned);
-      utter.lang = TTS_LANG;
+      
+      // Make Text-to-Speech dynamic to match selected language configuration
+      const targetLang = els.speechLang.value;
+      utter.lang = targetLang;
       utter.rate = parseFloat(els.speechRate.value) || 1;
-      const voice = getEnglishVoice();
+      
+      const voice = getFallbackVoice(targetLang);
       if (voice) utter.voice = voice;
+      
       utter.onend = () => els.stopSpeechBtn.classList.remove("active");
       utter.onerror = () => els.stopSpeechBtn.classList.remove("active");
       els.stopSpeechBtn.classList.add("active");
