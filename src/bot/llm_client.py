@@ -16,6 +16,15 @@ GEMINI_CHAT_MODEL = "gemini-2.5-flash"
 GEMINI_MAX_RETRIES = 3
 RETRYABLE_GEMINI_CODES = {429, 500, 503, 504}
 
+# Tried in order after GROQ_CHAT_MODEL when Gemini is unavailable.
+DEFAULT_GROQ_FALLBACK_MODELS = [
+    "openai/gpt-oss-120b",
+    "qwen/qwen3-32b",
+    "openai/gpt-oss-20b",
+    "meta-llama/llama-4-scout-17b-16e-instruct",
+    "llama-3.1-8b-instant",
+]
+
 
 class ChatLLM:
     def __init__(self):
@@ -74,7 +83,8 @@ class ChatLLM:
         primary = optional_env("GROQ_CHAT_MODEL", "llama-3.3-70b-versatile")
         if primary:
             models.append(primary)
-        for model in env_list("GROQ_CHAT_FALLBACK_MODELS"):
+        fallbacks = env_list("GROQ_CHAT_FALLBACK_MODELS") or DEFAULT_GROQ_FALLBACK_MODELS
+        for model in fallbacks:
             if model not in models:
                 models.append(model)
         return models
