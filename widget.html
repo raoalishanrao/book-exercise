@@ -174,7 +174,7 @@
     }
 
     .settings-panel.open {
-      max-height: 200px;
+      max-height: 160px;
       opacity: 1;
       padding: 14px 18px;
     }
@@ -485,6 +485,50 @@
       color: #64748b;
       text-align: center;
     }
+
+    .lang-bar {
+      display: flex;
+      align-items: center;
+      justify-content: space-between;
+      gap: 10px;
+      margin-bottom: 8px;
+    }
+
+    .lang-bar label {
+      font-size: 0.72rem;
+      color: #94a3b8;
+      white-space: nowrap;
+    }
+
+    .lang-toggle {
+      display: inline-flex;
+      padding: 3px;
+      border-radius: 10px;
+      background: rgba(15, 23, 42, 0.6);
+      border: 1px solid rgba(148, 163, 184, 0.15);
+    }
+
+    .lang-btn {
+      border: none;
+      background: transparent;
+      color: #94a3b8;
+      font-size: 0.75rem;
+      font-weight: 600;
+      padding: 6px 14px;
+      border-radius: 8px;
+      cursor: pointer;
+      transition: background 0.15s, color 0.15s;
+    }
+
+    .lang-btn.active {
+      background: var(--accent);
+      color: #fff;
+      box-shadow: 0 2px 8px var(--accent-glow);
+    }
+
+    .lang-btn:hover:not(.active) {
+      color: #e2e8f0;
+    }
   </style>
 </head>
 <body>
@@ -512,20 +556,8 @@
           Read replies aloud
         </label>
         <label>
-          Voice
-          <select id="voice-select" disabled><option value="">Default Voice</option></select>
-        </label>
-        <label>
           Speed
           <input type="range" id="speech-rate" min="0.7" max="1.3" step="0.1" value="1" />
-        </label>
-        <label>
-          Mic language
-          <select id="speech-lang">
-            <option value="en-US">English (US)</option>
-            <option value="en-GB">English (UK)</option>
-            <option value="ur-PK">Urdu (Pakistan) / اردو</option>
-          </select>
         </label>
         <label class="toggle-row" style="grid-column:1/-1">
           <button type="button" class="icon-btn stop" id="stop-speech-btn" disabled title="Stop speaking" style="width:auto;padding:0 12px;gap:6px;font-size:0.75rem">
@@ -557,8 +589,15 @@
     </div>
 
     <footer class="composer">
+      <div class="lang-bar">
+        <label>Input language</label>
+        <div class="lang-toggle" role="group" aria-label="Input language">
+          <button type="button" class="lang-btn active" id="lang-ur" data-lang="ur">اردو</button>
+          <button type="button" class="lang-btn" id="lang-en" data-lang="en">English</button>
+        </div>
+      </div>
       <div class="composer-box">
-        <textarea id="input" rows="1" placeholder="Ask anything from your book..." disabled></textarea>
+        <textarea id="input" rows="1" dir="auto" placeholder="اردو یا English میں لکھیں..." disabled></textarea>
         <div class="composer-actions">
           <button type="button" class="btn-mic" id="mic-btn" disabled title="Voice input" aria-label="Voice input">
             <svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" stroke-linecap="round"><path d="M12 1a3 3 0 0 0-3 3v8a3 3 0 0 0 6 0V4a3 3 0 0 0-3-3z"/><path d="M19 10v2a7 7 0 0 1-14 0v-2"/><line x1="12" y1="19" x2="12" y2="23"/><line x1="8" y1="23" x2="16" y2="23"/></svg>
@@ -568,7 +607,7 @@
           </button>
         </div>
       </div>
-      <p class="composer-hint">Tap mic · wait for Speak now · pause when done</p>
+      <p class="composer-hint" id="composer-hint">اردو منتخب ہے — مائک سے اردو میں بولیں</p>
     </footer>
   </div>
 
@@ -586,27 +625,48 @@
       micBtn: document.getElementById("mic-btn"),
       stopSpeechBtn: document.getElementById("stop-speech-btn"),
       autoTts: document.getElementById("auto-tts"),
-      voiceSelect: document.getElementById("voice-select"),
       speechRate: document.getElementById("speech-rate"),
-      speechLang: document.getElementById("speech-lang"),
       sttLive: document.getElementById("stt-live"),
       sttText: document.getElementById("stt-text"),
       settingsBtn: document.getElementById("settings-btn"),
       settingsPanel: document.getElementById("settings-panel"),
+      langUr: document.getElementById("lang-ur"),
+      langEn: document.getElementById("lang-en"),
+      composerHint: document.getElementById("composer-hint"),
     };
 
     let sessionId = null;
     let busy = false;
     let listening = false;
     let recognition = null;
-    let voices = [];
+    let voiceEngine = "browser"; // "server" | "browser"
+    let serverTtsSupported = false;
+    let sttLanguage = "ur";
+    let inputLanguage = "ur";
+    let speechVoices = [];
+    let mediaRecorder = null;
+    let mediaStream = null;
+    let audioChunks = [];
+    let wavContext = null;
+    let wavSource = null;
+    let wavProcessor = null;
+    let wavBuffers = [];
+    let recordingActive = false;
+    let silenceFrame = null;
+    let stopSilenceDetector = null;
+    let currentAudio = null;
 
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
-    const ttsSupported = "speechSynthesis" in window;
-    const sttSupported = !!SpeechRecognition;
+    const browserTtsSupported = "speechSynthesis" in window;
+    const browserSttSupported = !!SpeechRecognition;
+    let ttsSupported = browserTtsSupported;
+    let sttSupported = browserSttSupported;
+    const systemLang = navigator.language || "";
 
-    const MIC_COUNTDOWN_MS = 1200;
-    const SILENCE_STOP_MS = 1600;
+    const MIC_COUNTDOWN_MS = 1000;
+    const SILENCE_STOP_MS = 3800;
+    const MIN_RECORD_MS = 2000;
+    const RECORD_WARMUP_MS = 600;
 
     let micStartTimer = null;
     let micCountdownTimer = null;
@@ -614,6 +674,7 @@
     let micBaseText = "";
     let micSessionText = "";
     let micSessionActive = false;
+    let recordStartedAt = 0;
 
     els.settingsBtn.addEventListener("click", () => {
       els.settingsPanel.classList.toggle("open");
@@ -627,87 +688,421 @@
       const saved = JSON.parse(localStorage.getItem("tutorVoice") || "{}");
       if (saved.autoTts !== undefined) els.autoTts.checked = saved.autoTts;
       if (saved.rate) els.speechRate.value = saved.rate;
-      const allowedLangs = ["en-US", "en-GB", "ur-PK"];
-      if (saved.lang && allowedLangs.includes(saved.lang)) els.speechLang.value = saved.lang;
-      else els.speechLang.value = "en-US";
-      if (saved.voiceURI) els.voiceSelect.dataset.savedUri = saved.voiceURI;
+      if (saved.inputLanguage === "en" || saved.inputLanguage === "ur") {
+        setInputLanguage(saved.inputLanguage, false);
+      } else {
+        setInputLanguage("ur", false);
+      }
     }
 
     function saveVoiceSettings() {
       localStorage.setItem("tutorVoice", JSON.stringify({
         autoTts: els.autoTts.checked,
         rate: els.speechRate.value,
-        lang: els.speechLang.value,
-        voiceURI: els.voiceSelect.value,
+        inputLanguage,
       }));
     }
 
-    function populateVoices() {
-      if (!ttsSupported) return;
-      voices = window.speechSynthesis.getVoices();
-      const prev = els.voiceSelect.value || els.voiceSelect.dataset.savedUri || "";
-      els.voiceSelect.innerHTML = '<option value="">Default Voice</option>';
-      
-      // Filter voices to include both English and Urdu voices
-      voices.filter((v) => v.lang.startsWith("en") || v.lang.startsWith("ur")).forEach((v) => {
-        const opt = document.createElement("option");
-        opt.value = v.voiceURI;
-        opt.textContent = `${v.name} (${v.lang})`;
-        els.voiceSelect.appendChild(opt);
-      });
-      if (prev && [...els.voiceSelect.options].some((o) => o.value === prev)) {
-        els.voiceSelect.value = prev;
+    function setInputLanguage(lang, persist = true) {
+      inputLanguage = lang === "en" ? "en" : "ur";
+      sttLanguage = inputLanguage;
+      els.langUr.classList.toggle("active", inputLanguage === "ur");
+      els.langEn.classList.toggle("active", inputLanguage === "en");
+      if (inputLanguage === "ur") {
+        els.input.placeholder = "اردو میں لکھیں یا مائک استعمال کریں...";
+        els.input.setAttribute("dir", "rtl");
+        els.composerHint.textContent = "اردو منتخب ہے — مائک سے اردو میں بولیں";
+      } else {
+        els.input.placeholder = "Type or speak in English...";
+        els.input.setAttribute("dir", "ltr");
+        els.composerHint.textContent = "English selected — speak in English using the mic";
       }
-      els.voiceSelect.disabled = false;
-      els.stopSpeechBtn.disabled = false;
+      if (recognition) {
+        recognition.lang = inputLanguage === "ur" ? "ur-PK" : "en-US";
+      }
+      if (voiceEngine === "server" && sttSupported) {
+        els.micBtn.title = inputLanguage === "ur" ? "Voice input (Urdu)" : "Voice input (English)";
+      }
+      if (persist) saveVoiceSettings();
     }
+
+    els.langUr.addEventListener("click", () => setInputLanguage("ur"));
+    els.langEn.addEventListener("click", () => setInputLanguage("en"));
 
     function textForSpeech(raw) {
       if (!raw) return "";
-      // Clean up whitespace while keeping non-Latin script characters alive
-      return raw.replace(/\s+/g, " ").trim();
+      return raw
+        .replace(/\$\$[^$]+\$\$/g, " ")
+        .replace(/\$([^$]+)\$/g, "$1")
+        .replace(/\s+/g, " ")
+        .trim();
     }
 
-    function getSelectedVoice() {
-      const uri = els.voiceSelect.value;
-      return voices.find((v) => v.voiceURI === uri) || null;
+    const URDU_LATIN_HINT =
+      /\b(aap|ap|main|mein|mera|meri|tum|hai|hain|ho|hoon|hun|ko|ki|ke|ka|se|par|yeh|ye|woh|wo|bohat|bahut|acha|achha|beta|samjh|samajh|nahi|nahin|kya|kyun|kyon|sir|jee|theek|bilkul|shabaash|muje|mujhe|aapko|hum|aur|lekin|magar|agar|jab|tab|karo|karein|sakti|sakta|dena|lena|karna|hona|maqsad|misaal|misal|mushkil|fahm|ratta|beta)\b/i;
+
+    function isUrduSegment(text) {
+      const chunk = text.trim();
+      if (!chunk) return false;
+      if (/[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/.test(chunk)) return true;
+      if (!/[A-Za-z]/.test(chunk)) return false;
+      return URDU_LATIN_HINT.test(chunk);
     }
 
-    function getFallbackVoice(langTarget) {
-      const picked = getSelectedVoice();
-      if (picked && (picked.lang.startsWith("en") || picked.lang.startsWith("ur"))) return picked;
-      
-      // Fallback matching logic based on widget language preference
-      if (langTarget.startsWith("ur")) {
-        return voices.find((v) => v.lang.startsWith("ur")) || voices.find((v) => v.lang.startsWith("en")) || null;
+    function buildSpeechSegments(text) {
+      const sentences = text.split(/(?<=[.!?؟۔])\s+|\n+/).map((s) => s.trim()).filter(Boolean);
+      const segments = [];
+      for (const sentence of sentences) {
+        const lang = isUrduSegment(sentence) ? "ur-PK" : "en-US";
+        const last = segments[segments.length - 1];
+        if (last && last.lang === lang) last.text += ` ${sentence}`;
+        else segments.push({ text: sentence, lang });
       }
-      return voices.find((v) => v.lang === "en-US") || voices.find((v) => v.lang.startsWith("en")) || null;
+      return segments.length ? segments : [{ text, lang: isUrduSegment(text) ? "ur-PK" : "en-US" }];
     }
 
-    function speak(text) {
-      if (!ttsSupported || !text) return;
+    function refreshSpeechVoices() {
+      speechVoices = window.speechSynthesis.getVoices();
+    }
+
+    function pickSpeechVoice(lang) {
+      const voices = speechVoices.length ? speechVoices : window.speechSynthesis.getVoices();
+      const prefs = lang.startsWith("ur")
+        ? ["ur-PK", "ur-IN", "hi-IN"]
+        : ["en-US", "en-GB", "en"];
+      for (const code of prefs) {
+        const voice = voices.find((v) => v.lang === code || v.lang.startsWith(code));
+        if (voice) return voice;
+      }
+      return voices.find((v) => v.lang.startsWith(lang.split("-")[0])) || null;
+    }
+
+    function speakWithBrowser(text) {
+      const segments = buildSpeechSegments(text);
+      let index = 0;
+
+      const speakNext = () => {
+        if (index >= segments.length) {
+          els.stopSpeechBtn.classList.remove("active");
+          return;
+        }
+        const segment = segments[index++];
+        const utter = new SpeechSynthesisUtterance(segment.text);
+        utter.lang = segment.lang;
+        utter.rate = parseFloat(els.speechRate.value) || 1;
+        const voice = pickSpeechVoice(segment.lang);
+        if (voice) utter.voice = voice;
+        utter.onend = speakNext;
+        utter.onerror = speakNext;
+        window.speechSynthesis.speak(utter);
+      };
+
+      window.speechSynthesis.cancel();
+      speakNext();
+    }
+
+    function stopCurrentAudio() {
+      if (currentAudio) {
+        currentAudio.pause();
+        currentAudio.src = "";
+        currentAudio = null;
+      }
+    }
+
+    async function speak(text) {
       const cleaned = textForSpeech(text);
       if (!cleaned) return;
-      window.speechSynthesis.cancel();
-      const utter = new SpeechSynthesisUtterance(cleaned);
-      
-      // Make Text-to-Speech dynamic to match selected language configuration
-      const targetLang = els.speechLang.value;
-      utter.lang = targetLang;
-      utter.rate = parseFloat(els.speechRate.value) || 1;
-      
-      const voice = getFallbackVoice(targetLang);
-      if (voice) utter.voice = voice;
-      
-      utter.onend = () => els.stopSpeechBtn.classList.remove("active");
-      utter.onerror = () => els.stopSpeechBtn.classList.remove("active");
+
+      stopSpeaking();
       els.stopSpeechBtn.classList.add("active");
-      window.speechSynthesis.speak(utter);
+      els.stopSpeechBtn.disabled = false;
+
+      if (serverTtsSupported) {
+        try {
+          const res = await fetch(`${API_BASE}/api/voice/synthesize`, {
+            method: "POST",
+            headers: { "Content-Type": "application/json" },
+            body: JSON.stringify({
+              text: cleaned,
+              speed: parseFloat(els.speechRate.value) || 1,
+            }),
+          });
+          if (!res.ok) {
+            const err = await res.json().catch(() => ({}));
+            throw new Error(err.detail || `TTS failed (${res.status})`);
+          }
+          const blob = await res.blob();
+          const url = URL.createObjectURL(blob);
+          currentAudio = new Audio(url);
+          currentAudio.onended = () => {
+            URL.revokeObjectURL(url);
+            els.stopSpeechBtn.classList.remove("active");
+            currentAudio = null;
+          };
+          currentAudio.onerror = () => {
+            URL.revokeObjectURL(url);
+            els.stopSpeechBtn.classList.remove("active");
+            currentAudio = null;
+          };
+          await currentAudio.play();
+          return;
+        } catch (err) {
+          console.warn("Server TTS failed, falling back to browser:", err);
+        }
+      }
+
+      if (!browserTtsSupported) return;
+      speakWithBrowser(cleaned);
     }
 
     function stopSpeaking() {
-      if (ttsSupported) window.speechSynthesis.cancel();
+      stopCurrentAudio();
+      if (browserTtsSupported) window.speechSynthesis.cancel();
       els.stopSpeechBtn.classList.remove("active");
+    }
+
+    function mergeFloat32(chunks) {
+      const total = chunks.reduce((sum, chunk) => sum + chunk.length, 0);
+      const merged = new Float32Array(total);
+      let offset = 0;
+      for (const chunk of chunks) {
+        merged.set(chunk, offset);
+        offset += chunk.length;
+      }
+      return merged;
+    }
+
+    function floatTo16BitPCM(float32) {
+      const out = new Int16Array(float32.length);
+      for (let i = 0; i < float32.length; i++) {
+        const sample = Math.max(-1, Math.min(1, float32[i]));
+        out[i] = sample < 0 ? sample * 0x8000 : sample * 0x7fff;
+      }
+      return out;
+    }
+
+    function buildWavBlob(float32Samples, sampleRate) {
+      const pcm = floatTo16BitPCM(float32Samples);
+      const dataBytes = pcm.length * 2;
+      const buffer = new ArrayBuffer(44 + dataBytes);
+      const view = new DataView(buffer);
+      const writeStr = (offset, str) => {
+        for (let i = 0; i < str.length; i++) view.setUint8(offset + i, str.charCodeAt(i));
+      };
+      writeStr(0, "RIFF");
+      view.setUint32(4, 36 + dataBytes, true);
+      writeStr(8, "WAVE");
+      writeStr(12, "fmt ");
+      view.setUint32(16, 16, true);
+      view.setUint16(20, 1, true);
+      view.setUint16(22, 1, true);
+      view.setUint32(24, sampleRate, true);
+      view.setUint32(28, sampleRate * 2, true);
+      view.setUint16(32, 2, true);
+      view.setUint16(34, 16, true);
+      writeStr(36, "data");
+      view.setUint32(40, dataBytes, true);
+      let offset = 44;
+      for (let i = 0; i < pcm.length; i++, offset += 2) {
+        view.setInt16(offset, pcm[i], true);
+      }
+      return new Blob([buffer], { type: "audio/wav" });
+    }
+
+    function cleanupWavCapture() {
+      recordingActive = false;
+      if (wavProcessor) {
+        try { wavProcessor.disconnect(); } catch {}
+        wavProcessor.onaudioprocess = null;
+        wavProcessor = null;
+      }
+      if (wavSource) {
+        try { wavSource.disconnect(); } catch {}
+        wavSource = null;
+      }
+      if (wavContext) {
+        wavContext.close().catch(() => {});
+        wavContext = null;
+      }
+      wavBuffers = [];
+    }
+
+    function cleanupMedia() {
+      if (stopSilenceDetector) {
+        stopSilenceDetector();
+        stopSilenceDetector = null;
+      }
+      if (silenceFrame) {
+        cancelAnimationFrame(silenceFrame);
+        silenceFrame = null;
+      }
+      if (mediaRecorder && mediaRecorder.state !== "inactive") {
+        try { mediaRecorder.stop(); } catch {}
+      }
+      mediaRecorder = null;
+      cleanupWavCapture();
+      if (mediaStream) {
+        mediaStream.getTracks().forEach((track) => track.stop());
+        mediaStream = null;
+      }
+      audioChunks = [];
+    }
+
+    function createSilenceDetector(stream, onSilence) {
+      const ctx = new AudioContext();
+      const source = ctx.createMediaStreamSource(stream);
+      const analyser = ctx.createAnalyser();
+      analyser.fftSize = 2048;
+      source.connect(analyser);
+      const data = new Uint8Array(analyser.fftSize);
+      let silentSince = null;
+
+      const check = () => {
+        analyser.getByteTimeDomainData(data);
+        let sum = 0;
+        for (let i = 0; i < data.length; i++) {
+          const sample = (data[i] - 128) / 128;
+          sum += sample * sample;
+        }
+        const rms = Math.sqrt(sum / data.length);
+        const speaking = rms > 0.012;
+
+        if (!speaking) {
+          if (recordStartedAt) {
+            const elapsed = Date.now() - recordStartedAt;
+            if (elapsed < RECORD_WARMUP_MS || elapsed < MIN_RECORD_MS) {
+              silenceFrame = requestAnimationFrame(check);
+              return;
+            }
+          }
+          if (!silentSince) silentSince = Date.now();
+          else if (Date.now() - silentSince > SILENCE_STOP_MS) {
+            onSilence();
+            return;
+          }
+        } else {
+          silentSince = null;
+        }
+        silenceFrame = requestAnimationFrame(check);
+      };
+      check();
+      return () => {
+        if (silenceFrame) cancelAnimationFrame(silenceFrame);
+        ctx.close().catch(() => {});
+      };
+    }
+
+    function stopServerRecording() {
+      if (!recordingActive && (!mediaRecorder || mediaRecorder.state !== "recording")) return;
+      const elapsed = recordStartedAt ? Date.now() - recordStartedAt : MIN_RECORD_MS;
+      if (elapsed < MIN_RECORD_MS) {
+        setSttText(`Keep speaking... ${Math.ceil((MIN_RECORD_MS - elapsed) / 1000)}s more`);
+        return;
+      }
+      setSttText("Processing...");
+      recordingActive = false;
+
+      if (wavProcessor) {
+        setTimeout(() => finishWavRecording(), 200);
+        return;
+      }
+      setTimeout(() => {
+        if (mediaRecorder?.state === "recording") {
+          try { mediaRecorder.requestData(); } catch {}
+          mediaRecorder.stop();
+        }
+      }, 200);
+    }
+
+    async function finishWavRecording() {
+      const sampleRate = wavContext?.sampleRate || 48000;
+      const merged = mergeFloat32(wavBuffers);
+      const durationSec = merged.length / sampleRate;
+      const blob = buildWavBlob(merged, sampleRate);
+
+      if (mediaStream) {
+        mediaStream.getTracks().forEach((track) => track.stop());
+        mediaStream = null;
+      }
+      cleanupWavCapture();
+      listening = false;
+      els.micBtn.classList.remove("active");
+
+      if (durationSec < 0.4 || blob.size < 5000) {
+        setSttText("Recording too short — speak 2+ seconds and try again");
+        micSessionActive = false;
+        setTimeout(() => els.sttLive.classList.remove("visible"), 2500);
+        return;
+      }
+
+      setSttText("Processing...");
+      try {
+        const result = await transcribeBlob(blob, "recording.wav");
+        micSessionText = (result.text || "").trim();
+        if (!micSessionText) {
+          setSttText("Couldn't understand — try again, speak clearly");
+          micSessionActive = false;
+          setTimeout(() => els.sttLive.classList.remove("visible"), 2500);
+          return;
+        }
+        finalizeMicSession();
+      } catch (err) {
+        setSttText(`Mic error: ${err.message}`);
+        micSessionActive = false;
+        micSessionText = "";
+        setTimeout(() => els.sttLive.classList.remove("visible"), 2500);
+      }
+    }
+
+    async function transcribeBlob(blob, filename = "recording.wav") {
+      const form = new FormData();
+      form.append("audio", blob, filename);
+      form.append("language", inputLanguage);
+      form.append("output", inputLanguage === "ur" ? "urdu" : "english");
+      const res = await fetch(`${API_BASE}/api/voice/transcribe`, {
+        method: "POST",
+        body: form,
+      });
+      if (!res.ok) {
+        const err = await res.json().catch(() => ({}));
+        throw new Error(err.detail || `Transcription failed (${res.status})`);
+      }
+      return res.json();
+    }
+
+    async function startServerRecording() {
+      setSttText("Opening mic...");
+      mediaStream = await navigator.mediaDevices.getUserMedia({
+        audio: {
+          channelCount: 1,
+          echoCancellation: true,
+          noiseSuppression: false,
+          autoGainControl: true,
+        },
+      });
+
+      wavBuffers = [];
+      wavContext = new AudioContext();
+      await wavContext.resume();
+      wavSource = wavContext.createMediaStreamSource(mediaStream);
+      wavProcessor = wavContext.createScriptProcessor(4096, 1, 1);
+      wavProcessor.onaudioprocess = (event) => {
+        if (!recordingActive) return;
+        wavBuffers.push(new Float32Array(event.inputBuffer.getChannelData(0)));
+      };
+      wavSource.connect(wavProcessor);
+      wavProcessor.connect(wavContext.destination);
+
+      recordStartedAt = Date.now();
+      recordingActive = true;
+      listening = true;
+      els.micBtn.classList.add("active");
+      els.sttLive.classList.add("visible");
+      setSttText("Recording — speak your full question");
+
+      stopSilenceDetector = createSilenceDetector(mediaStream, () => {
+        stopServerRecording();
+      });
     }
 
     function cancelMicStart() {
@@ -739,6 +1134,10 @@
 
     function stopMicEarly() {
       clearSilenceTimer();
+      if (voiceEngine === "server") {
+        stopServerRecording();
+        return;
+      }
       if (recognition && (listening || micSessionActive)) recognition.stop();
     }
 
@@ -761,12 +1160,20 @@
     }
 
     function initSTT() {
-      if (!sttSupported) { els.micBtn.title = "Voice input not supported"; return; }
+      if (voiceEngine === "server") {
+        if (navigator.mediaDevices?.getUserMedia) {
+          els.micBtn.disabled = false;
+        } else {
+          els.micBtn.title = "Microphone not supported";
+        }
+        return;
+      }
+      if (!browserSttSupported) { els.micBtn.title = "Voice input not supported"; return; }
       els.micBtn.disabled = false;
       recognition = new SpeechRecognition();
       recognition.continuous = false;
       recognition.interimResults = true;
-      recognition.lang = els.speechLang.value;
+      recognition.lang = inputLanguage === "ur" ? "ur-PK" : "en-US";
 
       recognition.onstart = () => {
         listening = true;
@@ -824,20 +1231,36 @@
     }
 
     function toggleMic() {
-      if (!recognition || busy) return;
-      if (micStartTimer || micCountdownTimer) { cancelMicStart(); micSessionActive = false; return; }
-      if (listening || micSessionActive) { stopMicEarly(); return; }
+      if (busy) return;
+      if (micStartTimer || micCountdownTimer) { cancelMicStart(); micSessionActive = false; cleanupMedia(); return; }
+      if (listening || micSessionActive) {
+        if (voiceEngine === "server" && (recordingActive || mediaRecorder?.state === "recording")) {
+          stopServerRecording();
+        } else {
+          stopMicEarly();
+        }
+        return;
+      }
 
       stopSpeaking();
-      recognition.lang = els.speechLang.value;
       micBaseText = els.input.value.trim();
       micSessionText = "";
       micSessionActive = true;
       els.micBtn.classList.add("active");
       els.sttLive.classList.add("visible");
 
-      startMicCountdown(() => {
-        micStartTimer = setTimeout(() => {
+      if (voiceEngine === "server") {
+        startServerRecording().catch((err) => {
+          setSttText(`Mic error: ${err.message}`);
+          micSessionActive = false;
+          cleanupMedia();
+          setTimeout(() => els.sttLive.classList.remove("visible"), 2500);
+        });
+        return;
+      }
+
+      startMicCountdown(async () => {
+        micStartTimer = setTimeout(async () => {
           micStartTimer = null;
           try { recognition.start(); }
           catch {
@@ -902,8 +1325,11 @@
       busy = on;
       els.send.disabled = on || !sessionId;
       els.input.disabled = on || !sessionId;
-      if (on && (listening || micSessionActive) && recognition) stopMicEarly();
-      if (on) cancelMicStart();
+      if (on && (listening || micSessionActive)) stopMicEarly();
+      if (on) {
+        cancelMicStart();
+        cleanupMedia();
+      }
       els.micBtn.disabled = on || !sessionId || !sttSupported;
       els.typing.classList.toggle("visible", on);
     }
@@ -920,6 +1346,32 @@
       return res.json();
     }
 
+    async function initVoiceEngine() {
+      try {
+        const caps = await api("/api/voice/capabilities");
+        serverTtsSupported = !!caps.tts;
+        if (caps.stt_language) { /* server default; user picker controls language */ }
+        if (caps.stt) {
+          voiceEngine = "server";
+          sttSupported = true;
+          els.micBtn.title = inputLanguage === "ur" ? "Voice input (Urdu)" : "Voice input (English)";
+        } else {
+          voiceEngine = "browser";
+          sttSupported = browserSttSupported;
+        }
+        ttsSupported = serverTtsSupported || browserTtsSupported;
+        if (ttsSupported) {
+          els.stopSpeechBtn.disabled = false;
+          els.autoTts.disabled = false;
+        }
+        return;
+      } catch {}
+      voiceEngine = "browser";
+      serverTtsSupported = false;
+      sttSupported = browserSttSupported;
+      ttsSupported = browserTtsSupported;
+    }
+
     async function initSession() {
       const session = await api("/api/sessions", {
         method: "POST",
@@ -934,7 +1386,9 @@
       clearSystemMessages();
       addMessage(
         "assistant",
-        `Hi! I'm your ${session.class_label} ${session.subject_name} tutor.\n\nAsk me to explain a topic or solve a problem from "${session.book_title}". Type or tap the mic to speak.`,
+        `Assalam-o-Alaikum, beta! Main Ustaad Jee hoon, aapki Miss Physics.\n\n` +
+        `Jee bilkul, main aapki ${session.subject_name} mein poori madad kar sakti hoon. ` +
+        `"${session.book_title}" se koi bhi topic ya numerical poochiye — Urdu mein likhein ya mic se Urdu mein boliye.`,
         { speak: true }
       );
 
@@ -972,11 +1426,6 @@
     els.stopSpeechBtn.addEventListener("click", stopSpeaking);
     els.autoTts.addEventListener("change", saveVoiceSettings);
     els.speechRate.addEventListener("input", saveVoiceSettings);
-    els.speechLang.addEventListener("change", () => {
-      if (recognition) recognition.lang = els.speechLang.value;
-      saveVoiceSettings();
-    });
-    els.voiceSelect.addEventListener("change", saveVoiceSettings);
 
     els.input.addEventListener("keydown", (e) => {
       if (e.key === "Enter" && !e.shiftKey) { e.preventDefault(); sendMessage(); }
@@ -988,23 +1437,26 @@
     });
 
     if (ttsSupported) {
-      populateVoices();
-      window.speechSynthesis.onvoiceschanged = populateVoices;
+      els.stopSpeechBtn.disabled = false;
     } else {
       els.autoTts.disabled = true;
-      els.voiceSelect.disabled = true;
       els.stopSpeechBtn.disabled = true;
     }
 
     loadVoiceSettings();
-    initSTT();
-    populateVoices();
+    if (browserTtsSupported) {
+      refreshSpeechVoices();
+      window.speechSynthesis.addEventListener("voiceschanged", refreshSpeechVoices);
+    }
 
     (async () => {
       try {
         await api("/api/health");
+        await initVoiceEngine();
+        initSTT();
         await initSession();
       } catch {
+        initSTT();
         clearSystemMessages();
         addMessage("system", "Cannot reach tutor API.\nRun: uvicorn src.api.main:app --reload --port 8000");
       }
