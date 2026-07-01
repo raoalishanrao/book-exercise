@@ -1,0 +1,3 @@
+# PDF book ingestion (pip install -r requirements.txt -r requirements-ingest.txt)
+-r requirements.txt
+pypdf>=5.0.0
