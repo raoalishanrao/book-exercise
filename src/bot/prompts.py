@@ -154,3 +154,11 @@ def format_response(text: str) -> str:
     text = re.sub(r"\n{3,}", "\n\n", text)
 
     return reply_to_roman_urdu(text.strip())
+
+
+def get_system_prompt() -> str:
+    from src.bot.dual_payload import DUAL_PAYLOAD_PROMPT, dual_payload_enabled
+
+    if dual_payload_enabled():
+        return f"{SYSTEM_PROMPT}\n\n{DUAL_PAYLOAD_PROMPT}"
+    return SYSTEM_PROMPT

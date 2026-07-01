@@ -1,6 +1,7 @@
 from abc import ABC, abstractmethod
 from uuid import UUID
 
+from src.bot.dual_payload import TutorReply
 from src.domain.models import BookScope
 
 
@@ -15,5 +16,5 @@ class TutoringBot(ABC):
         scope: BookScope,
         *,
         content_unit_id: UUID | None = None,
-    ) -> str:
+    ) -> TutorReply:
         ...

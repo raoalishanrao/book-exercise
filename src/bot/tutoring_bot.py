@@ -3,8 +3,9 @@ from uuid import UUID
 import logging
 
 from src.bot.base import TutoringBot
+from src.bot.dual_payload import TutorReply, dual_payload_enabled, parse_dual_payload
 from src.bot.llm_client import ChatLLM
-from src.bot.prompts import SYSTEM_PROMPT, format_response
+from src.bot.prompts import format_response, get_system_prompt
 from src.domain.models import BookScope, ChunkType
 from src.retrieval.hybrid_retriever import HybridRetriever
 
@@ -26,7 +27,7 @@ class GeminiTutoringBot(TutoringBot):
         scope: BookScope,
         *,
         content_unit_id: UUID | None = None,
-    ) -> str:
+    ) -> TutorReply:
         if content_unit_id:
             chunks = self.retriever.get_problem_context(content_unit_id, include_solution=False)
         else:
@@ -56,10 +57,32 @@ class GeminiTutoringBot(TutoringBot):
             f"STUDENT (latest message):\n{student_message}"
         )
 
-        answer, model_used = self.llm.generate(SYSTEM_PROMPT, user_prompt)
-        answer = format_response(answer)
-        self._save_messages(session_id, student_message, answer, chunk_ids, model_used)
-        return answer
+        answer, model_used = self.llm.generate(
+            get_system_prompt(),
+            user_prompt,
+            json_mode=dual_payload_enabled(),
+        )
+        logger.info(
+            "LLM raw response model=%s chars=%s\n%s",
+            model_used,
+            len(answer),
+            answer,
+        )
+        if dual_payload_enabled():
+            result = parse_dual_payload(answer)
+        else:
+            result = TutorReply(
+                display_text=format_response(answer),
+                speech_text="",
+            )
+        self._save_messages(
+            session_id,
+            student_message,
+            result,
+            chunk_ids,
+            model_used,
+        )
+        return result
 
     def _load_history(self, session_id: UUID) -> str:
         rows = (
@@ -81,7 +104,7 @@ class GeminiTutoringBot(TutoringBot):
         self,
         session_id: UUID,
         student_message: str,
-        answer: str,
+        answer: TutorReply,
         chunk_ids: list[str],
         model_used: str,
     ) -> None:
@@ -97,11 +120,16 @@ class GeminiTutoringBot(TutoringBot):
             }
         ).execute()
 
+        assistant_meta: dict = {}
+        if answer.speech_ready:
+            assistant_meta["speech_text"] = answer.speech_text
+
         self.supabase.table("conversation_messages").insert(
             {
                 **base,
                 "role": "assistant",
-                "content": answer,
+                "content": answer.display_text,
                 "retrieved_chunk_ids": chunk_ids,
+                "metadata": assistant_meta,
             }
         ).execute()

@@ -229,6 +229,34 @@ def to_roman_urdu(text: str) -> str:
     return result
 
 
+_TTS_URDU_FIXES: tuple[tuple[str, str], ...] = (
+    (r"بارومीटर|بارومीٹر|بارومीٹر", "بارومیٹر"),
+    (r"واٹر\s*بارومیٹر|water\s*barometer", "پانی کا بارومیٹر"),
+    (r"فضائیدباؤ", "فضائی دباؤ"),
+    (r"قدم-بی-قدم|قدم\s*بی\s*قدم", "قدم بہ قدم"),
+    (r"\bک\s+(تصور|معنی|مطلب|طریقہ|استعمال)", r"کا \1"),
+    (r"([\u0600-\u06FF])کا([\u0600-\u06FF])", r"\1 کا \2"),
+)
+
+
+def sanitize_urdu_tts_text(text: str) -> str:
+    """Fix LLM/Mavkif glitches before Edge TTS (Devanagari leaks, merged words)."""
+    from src.voice.urdu_phrases import normalize_pakistani_urdu_script
+
+    if not text:
+        return text
+    out = normalize_pakistani_urdu_script(text)
+    if DEVANAGARI_RE.search(out):
+        logger.info("TTS: fixing Devanagari script leaks in Urdu text")
+        out = DEVANAGARI_RE.sub(lambda m: _devanagari_to_urdu(m.group(0)), out)
+        out = normalize_pakistani_urdu_script(out)
+    for pattern, replacement in _TTS_URDU_FIXES:
+        out = re.sub(pattern, replacement, out)
+    out = normalize_pakistani_urdu_script(out)
+    out = re.sub(r"\s+", " ", out).strip()
+    return out
+
+
 def reply_to_roman_urdu(text: str) -> str:
     """Force tutor replies to plain Roman Urdu — never Urdu Arabic or Devanagari."""
     if not text:

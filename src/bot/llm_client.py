@@ -32,9 +32,15 @@ class ChatLLM:
         self.groq_key = optional_env("GROQ_API_KEY")
         self.groq_models = self._groq_model_chain()
 
-    def generate(self, system_prompt: str, user_prompt: str) -> tuple[str, str]:
+    def generate(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        json_mode: bool = False,
+    ) -> tuple[str, str]:
         try:
-            text = self._generate_gemini(system_prompt, user_prompt)
+            text = self._generate_gemini(system_prompt, user_prompt, json_mode=json_mode)
             logger.info("Gemini reply ok model=%s", GEMINI_CHAT_MODEL)
             return text, GEMINI_CHAT_MODEL
         except Exception as exc:
@@ -48,15 +54,27 @@ class ChatLLM:
             if not self.groq_key:
                 raise
             logger.info("Falling back to Groq models: %s", self.groq_models)
-            return self._generate_groq(system_prompt, user_prompt)
+            return self._generate_groq(system_prompt, user_prompt, json_mode=json_mode)
 
-    def _generate_gemini(self, system_prompt: str, user_prompt: str) -> str:
+    def _generate_gemini(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        json_mode: bool = False,
+    ) -> str:
+        from google.genai import types
+
         prompt = f"{system_prompt}\n\n{user_prompt}"
+        config = None
+        if json_mode:
+            config = types.GenerateContentConfig(response_mime_type="application/json")
         for attempt in range(GEMINI_MAX_RETRIES):
             try:
                 response = self.gemini.models.generate_content(
                     model=GEMINI_CHAT_MODEL,
                     contents=prompt,
+                    config=config,
                 )
                 text = response.text
                 if text:
@@ -89,12 +107,21 @@ class ChatLLM:
                 models.append(model)
         return models
 
-    def _generate_groq(self, system_prompt: str, user_prompt: str) -> tuple[str, str]:
+    def _generate_groq(
+        self,
+        system_prompt: str,
+        user_prompt: str,
+        *,
+        json_mode: bool = False,
+    ) -> tuple[str, str]:
         if not self.groq_models:
             raise RuntimeError("GROQ_API_KEY is set but no GROQ_CHAT_MODEL configured")
 
         client = Groq(api_key=self.groq_key)
         last_error: Exception | None = None
+        groq_kwargs: dict = {}
+        if json_mode:
+            groq_kwargs["response_format"] = {"type": "json_object"}
 
         for model in self.groq_models:
             try:
@@ -107,6 +134,7 @@ class ChatLLM:
                     ],
                     temperature=0.4,
                     max_tokens=2048,
+                    **groq_kwargs,
                 )
                 text = (response.choices[0].message.content or "").strip()
                 if text:

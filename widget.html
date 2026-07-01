@@ -557,7 +557,7 @@
         </label>
         <label>
           Speed
-          <input type="range" id="speech-rate" min="0.7" max="1.3" step="0.1" value="1" />
+          <input type="range" id="speech-rate" min="0.7" max="1.3" step="0.1" value="0.9" />
         </label>
         <label class="toggle-row" style="grid-column:1/-1">
           <button type="button" class="icon-btn stop" id="stop-speech-btn" disabled title="Stop speaking" style="width:auto;padding:0 12px;gap:6px;font-size:0.75rem">
@@ -655,6 +655,9 @@
     let silenceFrame = null;
     let stopSilenceDetector = null;
     let currentAudio = null;
+    let currentAudioSource = null;
+    let audioCtx = null;
+    let speakSeq = 0;
 
     const SpeechRecognition = window.SpeechRecognition || window.webkitSpeechRecognition;
     const browserTtsSupported = "speechSynthesis" in window;
@@ -777,45 +780,162 @@
       return voices.find((v) => v.lang.startsWith(lang.split("-")[0])) || null;
     }
 
-    function speakWithBrowser(text) {
-      const segments = buildSpeechSegments(text);
+    /** One consistent Chromium voice for fallback (avoids male/female switching). */
+    function pickSingleBrowserVoice() {
+      const voices = speechVoices.length ? speechVoices : window.speechSynthesis.getVoices();
+      const urVoice =
+        voices.find((v) => v.lang === "ur-PK") ||
+        voices.find((v) => v.lang.startsWith("ur")) ||
+        voices.find((v) => /urdu/i.test(v.name));
+      if (urVoice) return urVoice;
+      const systemDefault = voices.find((v) => v.default);
+      if (systemDefault) return systemDefault;
+      const google = voices.find((v) => /google/i.test(v.name));
+      if (google) return google;
+      return voices[0] || null;
+    }
+
+    function speakWithBrowser(text, options = {}) {
+      const seq = options.speakSeq;
+      const voice = pickSingleBrowserVoice();
+      const rate = parseFloat(els.speechRate.value) || 1;
+      const lang = /[\u0600-\u06FF\u0750-\u077F\u08A0-\u08FF]/.test(text) ? "ur-PK" : "ur-PK";
+
+      window.speechSynthesis.cancel();
+      if (options.fallback) {
+        console.info("Chromium speechSynthesis fallback:", options.fallback);
+      }
+
+      const sentences = text
+        .split(/(?<=[.!?؟۔])\s+|\n+/)
+        .map((s) => s.trim())
+        .filter(Boolean);
+      const chunks = sentences.length ? sentences : [text];
       let index = 0;
 
       const speakNext = () => {
-        if (index >= segments.length) {
+        if (seq !== undefined && seq !== speakSeq) return;
+        if (index >= chunks.length) {
           els.stopSpeechBtn.classList.remove("active");
           return;
         }
-        const segment = segments[index++];
-        const utter = new SpeechSynthesisUtterance(segment.text);
-        utter.lang = segment.lang;
-        utter.rate = parseFloat(els.speechRate.value) || 1;
-        const voice = pickSpeechVoice(segment.lang);
+        const utter = new SpeechSynthesisUtterance(chunks[index++]);
+        utter.lang = lang;
+        utter.rate = rate;
         if (voice) utter.voice = voice;
         utter.onend = speakNext;
         utter.onerror = speakNext;
         window.speechSynthesis.speak(utter);
       };
 
-      window.speechSynthesis.cancel();
       speakNext();
     }
 
     function stopCurrentAudio() {
+      if (currentAudioSource) {
+        try {
+          currentAudioSource.onended = null;
+          currentAudioSource.stop(0);
+        } catch (_) {}
+        try {
+          currentAudioSource.disconnect();
+        } catch (_) {}
+        currentAudioSource = null;
+      }
       if (currentAudio) {
         currentAudio.pause();
+        currentAudio.onended = null;
+        currentAudio.onerror = null;
         currentAudio.src = "";
         currentAudio = null;
       }
     }
 
-    async function speak(text) {
+    function getAudioContext() {
+      if (!audioCtx) {
+        audioCtx = new (window.AudioContext || window.webkitAudioContext)();
+      }
+      return audioCtx;
+    }
+
+    /** Play TTS via Web Audio — IDM is less likely to hijack than <audio src=blob>. */
+    async function playServerAudioBlob(blob, { isCurrent, onEnded, onError }) {
+      const ctx = getAudioContext();
+      if (ctx.state === "suspended") {
+        await ctx.resume();
+      }
+      const raw = await blob.arrayBuffer();
+      if (!isCurrent()) return false;
+      let audioBuffer;
+      try {
+        audioBuffer = await ctx.decodeAudioData(raw.slice(0));
+      } catch (decodeErr) {
+        onError(decodeErr);
+        return false;
+      }
+      if (!isCurrent()) return false;
+      const source = ctx.createBufferSource();
+      source.buffer = audioBuffer;
+      source.connect(ctx.destination);
+      currentAudioSource = source;
+      source.onended = () => {
+        if (currentAudioSource === source) currentAudioSource = null;
+        onEnded();
+      };
+      source.start(0);
+      return true;
+    }
+
+    async function playServerAudioElement(blob, { isCurrent, onEnded, onError }) {
+      const url = URL.createObjectURL(blob);
+      currentAudio = new Audio(url);
+      currentAudio.onended = () => {
+        URL.revokeObjectURL(url);
+        currentAudio = null;
+        onEnded();
+      };
+      currentAudio.onerror = () => {
+        URL.revokeObjectURL(url);
+        currentAudio = null;
+        onError(new Error("audio-element-error"));
+      };
+      try {
+        await currentAudio.play();
+        return true;
+      } catch (playErr) {
+        URL.revokeObjectURL(url);
+        currentAudio = null;
+        onError(playErr);
+        return false;
+      }
+    }
+
+    async function speak(text, options = {}) {
       const cleaned = textForSpeech(text);
       if (!cleaned) return;
+      const browserText = textForSpeech(options.displayText || text);
 
-      stopSpeaking();
+      stopCurrentAudio();
+      if (browserTtsSupported) window.speechSynthesis.cancel();
+      const seq = ++speakSeq;
+      const isCurrent = () => seq === speakSeq;
+
       els.stopSpeechBtn.classList.add("active");
       els.stopSpeechBtn.disabled = false;
+
+      const finishPlayback = () => {
+        if (!isCurrent()) return;
+        els.stopSpeechBtn.classList.remove("active");
+      };
+
+      const useBrowserFallback = (reason) => {
+        if (!isCurrent()) return;
+        if (!browserTtsSupported) {
+          els.stopSpeechBtn.classList.remove("active");
+          return;
+        }
+        speakWithBrowser(browserText, { fallback: reason, speakSeq: seq });
+      };
 
       if (serverTtsSupported) {
         try {
@@ -825,37 +945,41 @@
             body: JSON.stringify({
               text: cleaned,
               speed: parseFloat(els.speechRate.value) || 1,
+              speech_ready: !!options.speechReady,
             }),
           });
+          if (!isCurrent()) return;
           if (!res.ok) {
             const err = await res.json().catch(() => ({}));
             throw new Error(err.detail || `TTS failed (${res.status})`);
           }
           const blob = await res.blob();
-          const url = URL.createObjectURL(blob);
-          currentAudio = new Audio(url);
-          currentAudio.onended = () => {
-            URL.revokeObjectURL(url);
-            els.stopSpeechBtn.classList.remove("active");
-            currentAudio = null;
+          if (!isCurrent() || !blob.size) return;
+
+          const playbackOpts = {
+            isCurrent,
+            onEnded: finishPlayback,
+            onError: () => useBrowserFallback("server-audio-playback"),
           };
-          currentAudio.onerror = () => {
-            URL.revokeObjectURL(url);
-            els.stopSpeechBtn.classList.remove("active");
-            currentAudio = null;
-          };
-          await currentAudio.play();
+
+          const viaWebAudio = await playServerAudioBlob(blob, playbackOpts);
+          if (!viaWebAudio && isCurrent()) {
+            await playServerAudioElement(blob, playbackOpts);
+          }
           return;
         } catch (err) {
-          console.warn("Server TTS failed, falling back to browser:", err);
+          if (!isCurrent()) return;
+          console.warn("Edge TTS failed, falling back to Chromium:", err);
+          useBrowserFallback(err?.message || "edge-request-failed");
+          return;
         }
       }
 
-      if (!browserTtsSupported) return;
-      speakWithBrowser(cleaned);
+      useBrowserFallback("server-tts-unavailable");
     }
 
     function stopSpeaking() {
+      speakSeq += 1;
       stopCurrentAudio();
       if (browserTtsSupported) window.speechSynthesis.cancel();
       els.stopSpeechBtn.classList.remove("active");
@@ -1272,6 +1396,8 @@
     }
 
     function addMessage(role, text, options = {}) {
+      const speechText = options.speechText || text;
+      const speechReady = !!options.speechText;
       const row = document.createElement("div");
       row.className = `msg-row ${role}`;
 
@@ -1296,6 +1422,7 @@
       const bubble = document.createElement("div");
       bubble.className = "msg";
       bubble.textContent = text;
+      if (options.speechText) bubble.dataset.speechText = options.speechText;
       body.appendChild(bubble);
 
       if (role === "assistant" && ttsSupported) {
@@ -1304,7 +1431,9 @@
         const listenBtn = document.createElement("button");
         listenBtn.type = "button";
         listenBtn.innerHTML = '<svg viewBox="0 0 24 24" fill="none" stroke="currentColor" stroke-width="2" width="12" height="12"><polygon points="11 5 6 9 2 9 2 15 6 15 11 19 11 5"/><path d="M15.54 8.46a5 5 0 0 1 0 7.07"/></svg> Listen';
-        listenBtn.addEventListener("click", () => speak(text));
+        listenBtn.addEventListener("click", () =>
+          speak(speechText, { speechReady, displayText: text })
+        );
         actions.appendChild(listenBtn);
         body.appendChild(actions);
       }
@@ -1313,7 +1442,9 @@
       els.messages.appendChild(row);
       els.messages.scrollTop = els.messages.scrollHeight;
 
-      if (role === "assistant" && options.speak && els.autoTts.checked) speak(text);
+      if (role === "assistant" && options.speak && els.autoTts.checked) {
+        speak(speechText, { speechReady, displayText: text });
+      }
       return row;
     }
 
@@ -1412,7 +1543,10 @@
           method: "POST",
           body: JSON.stringify({ session_id: sessionId, message: text }),
         });
-        addMessage("assistant", data.reply, { speak: true });
+        addMessage("assistant", data.reply, {
+          speak: true,
+          speechText: data.speech_text || null,
+        });
       } catch (err) {
         addMessage("system", `Error: ${err.message}`);
       } finally {

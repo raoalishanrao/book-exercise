@@ -72,6 +72,7 @@ class ChatRequest(BaseModel):
 
 class ChatResponse(BaseModel):
     reply: str
+    speech_text: str | None = None
     session_id: str
 
 
@@ -84,6 +85,7 @@ class MessageItem(BaseModel):
 class SynthesizeRequest(BaseModel):
     text: str = Field(min_length=1, max_length=8000)
     speed: float = Field(default=1.0, ge=0.7, le=1.3)
+    speech_ready: bool = False
 
 
 class TranscribeResponse(BaseModel):
@@ -103,7 +105,6 @@ def _stt_available() -> bool:
 
 def _tts_available() -> bool:
     try:
-        from huggingface_hub import InferenceClient  # noqa: F401
         from src.voice.tts_service import tts_available
 
         return tts_available()
@@ -111,8 +112,85 @@ def _tts_available() -> bool:
         return False
 
 
+def _tts_provider_label() -> str:
+    try:
+        from src.voice.tts_service import tts_available, tts_provider
+
+        if not tts_available():
+            return "disabled"
+        provider = tts_provider()
+        if provider == "openai":
+            return "openai"
+        if provider in {"edge", "microsoft"}:
+            return "edge-urdu"
+        if provider in {"mms", "urdu", "roman_urdu"}:
+            return "mms-roman-urdu"
+        if provider == "kokoro":
+            return "kokoro"
+        return provider
+    except Exception:
+        return "disabled"
+
+
 def _voice_stack_available() -> bool:
     return _stt_available() or _tts_available()
+
+
+@app.on_event("startup")
+def _log_voice_stack_on_startup() -> None:
+    stt = _stt_available()
+    tts = _tts_available()
+    label = _tts_provider_label()
+    logger.info("Voice stack ready: stt=%s tts=%s tts_provider=%s", stt, tts, label)
+    if tts and label == "edge-urdu":
+        voice = optional_env("EDGE_TTS_VOICE_UR", "ur-PK-UzmaNeural")
+        prep = optional_env("EDGE_TTS_ROMAN_PREP", "auto")
+        logger.info("Edge TTS Urdu voice=%s roman_prep=%s", voice, prep)
+        if prep == "mavkif":
+            try:
+                from src.voice.mavkif_transliterate import download_status, is_mavkif_cached, preload_mavkif_background
+
+                if is_mavkif_cached():
+                    logger.info(
+                        "Mavkif transliteration model is cached locally — used for Roman Urdu TTS prep"
+                    )
+                else:
+                    st = download_status()
+                    if st["partial_bytes"] > 0:
+                        logger.info(
+                            "Mavkif resuming download: %.1f / %.1f MB (%.1f%%)",
+                            st["partial_mb"],
+                            st["expected_mb"],
+                            st["percent"],
+                        )
+                    else:
+                        logger.info("Mavkif download not started — will fetch ~%.0f MB", st["expected_mb"])
+                    logger.info("LLM transliteration until download completes (background resume started)")
+                    preload_mavkif_background()
+            except Exception as exc:
+                logger.warning("Mavkif status check failed: %s", exc)
+        if prep == "mavkif" and optional_env("MAVKIF_PRELOAD", "false").lower() in {
+            "1",
+            "true",
+            "yes",
+            "on",
+        }:
+            try:
+                from src.voice.mavkif_transliterate import preload_mavkif_model
+
+                preload_mavkif_model()
+            except Exception as exc:
+                logger.error("Mavkif preload failed: %s", exc, exc_info=True)
+    elif tts and label == "mms-roman-urdu":
+        model = optional_env("URDU_TTS_MODEL", "facebook/mms-tts-urd-script_latin")
+        logger.info("Roman Urdu TTS model=%s (loads on first Listen, or set URDU_TTS_PRELOAD=true)", model)
+        if optional_env("URDU_TTS_PRELOAD", "false").lower() in {"1", "true", "yes", "on"}:
+            try:
+                from src.voice.mms_tts_service import preload_mms_model
+
+                preload_mms_model()
+            except Exception as exc:
+                logger.error("MMS TTS preload failed: %s", exc, exc_info=True)
 
 
 @app.get("/")
@@ -134,17 +212,26 @@ def health():
 def voice_capabilities():
     stt = _stt_available()
     tts = _tts_available()
+    tts_provider = _tts_provider_label()
     return {
         "available": stt,
         "stt": stt,
         "tts": tts,
         "stt_provider": "groq",
         "stt_language": optional_env("STT_LANGUAGE", "both"),
-        "tts_provider": "kokoro" if tts else "disabled",
+        "tts_provider": tts_provider,
         "languages": ["en", "ur", "both"],
         "note": (
             "Mic: speak English or Urdu — auto-detected."
             if stt and not tts
+            else "STT: Groq Whisper. TTS: Edge Urdu + Mavkif transliteration (LLM fallback)."
+            if stt and tts and tts_provider == "edge-urdu"
+            else "STT: Groq Whisper. TTS: MMS Roman Urdu (Latin script, open-source)."
+            if stt and tts and tts_provider == "mms-roman-urdu"
+            else "STT: Groq Whisper. TTS: Kokoro local (Hindi voice, Roman Urdu)."
+            if stt and tts and tts_provider == "kokoro"
+            else "STT: Groq Whisper. TTS: OpenAI."
+            if stt and tts and tts_provider == "openai"
             else "STT uses Groq Whisper. TTS uses Hugging Face Inference (Kokoro via fal-ai)."
             if stt and tts
             else "Set GROQ_API_KEY for speech-to-text."
@@ -198,14 +285,33 @@ def voice_synthesize(body: SynthesizeRequest):
     if not _tts_available():
         raise HTTPException(
             status_code=503,
-            detail="Kokoro TTS is disabled. Set KOKORO_TTS_ENABLED=true in .env to enable.",
+            detail="Text-to-speech is unavailable. Install torch+transformers for MMS Urdu, or set HF_TOKEN / OPENAI_API_KEY.",
         )
+    logger.info(
+        "TTS synthesize provider=%s chars=%s speech_ready=%s",
+        _tts_provider_label(),
+        len(body.text),
+        body.speech_ready,
+    )
     try:
-        from src.voice.tts_service import TTSService
+        from src.voice.tts_service import TTSService, tts_output_media_type
 
-        wav = TTSService().synthesize(body.text, speed=body.speed)
-        return Response(content=wav, media_type="audio/wav")
+        wav = TTSService().synthesize(
+            body.text,
+            speed=body.speed,
+            speech_ready=body.speech_ready,
+        )
+        return Response(
+            content=wav,
+            media_type=tts_output_media_type(),
+            headers={
+                "Content-Disposition": "inline",
+                "Cache-Control": "no-store",
+                "X-TTS-Playback": "1",
+            },
+        )
     except ValueError as exc:
+        logger.warning("TTS synthesize rejected: %s", exc)
         raise HTTPException(status_code=400, detail=str(exc)) from exc
     except Exception as exc:
         logger.error("Synthesize failed: %s\n%s", exc, traceback.format_exc())
@@ -293,13 +399,18 @@ def chat(body: ChatRequest):
 
     try:
         logger.info("Chat session=%s message_len=%s", body.session_id, len(body.message))
-        reply = get_bot().reply(
+        result = get_bot().reply(
             session_id,
             body.message.strip(),
             get_scope(),
             content_unit_id=content_unit_id,
         )
-        logger.info("Chat ok session=%s reply_len=%s", body.session_id, len(reply))
+        logger.info(
+            "Chat ok session=%s reply_len=%s speech_len=%s",
+            body.session_id,
+            len(result.display_text),
+            len(result.speech_text),
+        )
     except Exception as exc:
         logger.error(
             "Chat failed session=%s error=%s\n%s",
@@ -311,7 +422,11 @@ def chat(body: ChatRequest):
             status_code=503,
             detail=f"Tutor is temporarily unavailable. Please try again. ({exc})",
         ) from exc
-    return ChatResponse(reply=reply, session_id=body.session_id)
+    return ChatResponse(
+        reply=result.display_text,
+        speech_text=result.speech_text or None,
+        session_id=body.session_id,
+    )
 
 
 @app.get("/api/sessions/{session_id}/messages", response_model=list[MessageItem])
